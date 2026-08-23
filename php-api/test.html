@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>API 진단</title>
+<style>
+body{font-family:monospace;padding:2rem;background:#1a1a2e;color:#eee;max-width:700px;margin:auto}
+h2{color:#4fc3f7}.ok{color:#69f0ae}.err{color:#ff5252}.warn{color:#ffab40}
+pre{background:#0d0d1a;padding:1rem;border-radius:8px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+button{padding:.5rem 1.5rem;background:#4fc3f7;color:#000;border:none;border-radius:6px;cursor:pointer;font-size:1rem;margin:.5rem 0}
+</style>
+</head>
+<body>
+<h2>🔍 전일련 API 진단</h2>
+<button onclick="runTest()">진단 시작</button>
+<pre id="log">버튼을 클릭하세요...</pre>
+
+<script>
+const API = 'https://cargowing.gabia.io/wings_html/api/api.php';
+const log = document.getElementById('log');
+
+function write(msg, cls='') {
+  log.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+}
+
+async function runTest() {
+  log.innerHTML = '';
+  write('=== API 진단 시작 ===\n');
+  write(`현재 페이지: ${location.href}`);
+  write(`API 주소: ${API}?action=ping\n`);
+
+  // 1. 기본 fetch 테스트
+  write('1. fetch 테스트...');
+  try {
+    const res = await fetch(`${API}?action=ping`);
+    write(`   HTTP 상태: ${res.status} ${res.statusText}`, res.ok ? 'ok' : 'err');
+    write(`   Content-Type: ${res.headers.get('content-type')}`);
+    const text = await res.text();
+    write(`   응답 (앞 200자): ${text.substring(0, 200)}`);
+    try {
+      const json = JSON.parse(text);
+      write(`   JSON ok 필드: ${json.ok}`, json.ok ? 'ok' : 'err');
+      write(`   버전: ${json.version}`, 'ok');
+    } catch(e) {
+      write(`   JSON 파싱 실패: ${e.message}`, 'err');
+    }
+  } catch(e) {
+    write(`   fetch 실패: ${e.name} - ${e.message}`, 'err');
+    if (e.name === 'TypeError') write('   → CORS 또는 네트워크 오류 가능성', 'warn');
+  }
+
+  // 2. AbortSignal.timeout 지원 여부
+  write('\n2. AbortSignal.timeout 지원:');
+  write(`   ${typeof AbortSignal.timeout === 'function' ? '✅ 지원됨' : '❌ 미지원'}`,
+    typeof AbortSignal.timeout === 'function' ? 'ok' : 'err');
+
+  // 3. timeout 포함 fetch
+  write('\n3. timeout 포함 fetch...');
+  try {
+    const sig = typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(8000)
+      : undefined;
+    const res = await fetch(`${API}?action=ping`, { signal: sig });
+    const json = await res.json();
+    write(`   결과: ok=${json.ok}`, json.ok ? 'ok' : 'err');
+  } catch(e) {
+    write(`   실패: ${e.name} - ${e.message}`, 'err');
+  }
+
+  write('\n=== 진단 완료 ===');
+}
+</script>
+</body>
+</html>
