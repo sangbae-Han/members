@@ -1,37 +1,12 @@
 <?php
 /**
- * 전일련 회원관리 API  (정규화 버전)
- * jil_members / jil_admins / jil_discipline / jil_mutual_aid 테이블 사용
- * 배포 경로: /wings_html/api/api.php
+ * 전일련 회원관리 API
+ * config.php의 getDB() 사용 (기존 연결 방식 유지)
  */
+require_once __DIR__ . '/config.php';
 
-header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+function db(): PDO { return getDB(); }
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit; }
-
-// ── DB 연결 ───────────────────────────────────────────────────────────────────
-define('DB_HOST', 'db.cargowing.gabia.io');
-define('DB_PORT', 3306);
-define('DB_USER', 'cargowing');
-define('DB_PASS', 'cargodb13687413!');
-define('DB_NAME', 'jeonillyeondb');
-
-function db(): PDO {
-    static $pdo = null;
-    if ($pdo === null) {
-        $dsn = 'mysql:host='.DB_HOST.';port='.DB_PORT.';dbname='.DB_NAME.';charset=utf8mb4';
-        $pdo = new PDO($dsn, DB_USER, DB_PASS, [
-            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        ]);
-    }
-    return $pdo;
-}
-
-// ── 테이블 생성 (없을 때만) ───────────────────────────────────────────────────
 function initTables(): void {
     $pdo = db();
     $pdo->exec("CREATE TABLE IF NOT EXISTS jil_members (
@@ -46,9 +21,10 @@ function initTables(): void {
         vehicleType      VARCHAR(10)  NOT NULL DEFAULT '1톤',
         specialEquipments TEXT                 DEFAULT '',
         vehiclePhoto     MEDIUMTEXT            DEFAULT '',
+        postalCode       VARCHAR(10)           DEFAULT '',
         roadAddress      TEXT                  DEFAULT '',
-        mailingAddress   TEXT                  DEFAULT '',
-        updatedAt        DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        addressDetail    TEXT                  DEFAULT '',
+        mailingAddress   TEXT                  DEFAULT ''
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS jil_discipline (
@@ -78,13 +54,12 @@ function initTables(): void {
         name             VARCHAR(50)           DEFAULT '',
         isSuperAdmin     TINYINT(1)            DEFAULT 0
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
-}
 
-// ── 헬퍼 ─────────────────────────────────────────────────────────────────────
-function body(): array {
-    $raw = file_get_contents('php://input');
-    $d   = json_decode($raw, true);
-    return is_array($d) ? $d : [];
+    // 기존 테이블에 컬럼 없으면 추가
+    foreach (['postalCode VARCHAR(10) DEFAULT "" AFTER vehiclePhoto',
+              'addressDetail TEXT DEFAULT "" AFTER roadAddress'] as $col) {
+        try { $pdo->exec("ALTER TABLE jil_members ADD COLUMN $col"); } catch(Exception $e){}
+    }
 }
 
 function out($data): void {
@@ -92,266 +67,181 @@ function out($data): void {
     exit;
 }
 
-function ok($data = null): void {
-    out(['ok' => true, 'data' => $data]);
-}
+function ok($data = null): void { out(['ok' => true, 'data' => $data]); }
 
 function fail(string $msg, int $code = 400): void {
     http_response_code($code);
     out(['ok' => false, 'error' => $msg]);
 }
 
-// ── 회원 전체 조회 (discipline + mutual_aid 포함) ──────────────────────────
+function body(): array {
+    $d = json_decode(file_get_contents('php://input'), true);
+    return is_array($d) ? $d : [];
+}
+
 function getMembers(): array {
-    $pdo = db();
-
+    $pdo     = db();
     $members = $pdo->query("SELECT * FROM jil_members ORDER BY name")->fetchAll();
-
     if (empty($members)) return [];
 
-    // discipline 레코드
-    $discAll = $pdo->query("SELECT * FROM jil_discipline")->fetchAll();
-    $discMap = [];
-    foreach ($discAll as $r) $discMap[$r['memberId']][] = $r;
-
-    // mutual_aid 레코드
-    $aidAll = $pdo->query("SELECT * FROM jil_mutual_aid")->fetchAll();
-    $aidMap = [];
-    foreach ($aidAll as $r) $aidMap[$r['memberId']][] = $r;
+    $discMap = $aidMap = [];
+    foreach ($pdo->query("SELECT * FROM jil_discipline")->fetchAll() as $r)
+        $discMap[$r['memberId']][] = $r;
+    foreach ($pdo->query("SELECT * FROM jil_mutual_aid")->fetchAll() as $r)
+        $aidMap[$r['memberId']][] = $r;
 
     $result = [];
     foreach ($members as $m) {
         $id = $m['id'];
-        // specialEquipments: JSON 문자열 → 배열
         $eq = [];
         if (!empty($m['specialEquipments'])) {
             $decoded = json_decode($m['specialEquipments'], true);
             $eq = is_array($decoded) ? $decoded : array_filter(explode(',', $m['specialEquipments']));
         }
-
-        $discRecords = [];
-        foreach (($discMap[$id] ?? []) as $r) {
-            $discRecords[] = [
-                'id'               => $r['id'],
-                'date'             => $r['date'],
-                'content'          => $r['content'],
-                'disciplineDetail' => $r['disciplineDetail'],
-                'startDate'        => $r['startDate'],
-                'endDate'          => $r['endDate'],
-            ];
-        }
-
-        $aidRecords = [];
-        foreach (($aidMap[$id] ?? []) as $r) {
-            $aidRecords[] = [
-                'id'        => $r['id'],
-                'date'      => $r['date'],
-                'category'  => $r['category'],
-                'aidDetail' => $r['aidDetail'],
-                'amount'    => (int)$r['amount'],
-            ];
-        }
+        $disc = array_map(fn($r) => [
+            'id'=>$r['id'],'date'=>$r['date'],'content'=>$r['content'],
+            'disciplineDetail'=>$r['disciplineDetail'],'startDate'=>$r['startDate'],'endDate'=>$r['endDate']
+        ], $discMap[$id] ?? []);
+        $aid = array_map(fn($r) => [
+            'id'=>$r['id'],'date'=>$r['date'],'category'=>$r['category'],
+            'aidDetail'=>$r['aidDetail'],'amount'=>(int)$r['amount']
+        ], $aidMap[$id] ?? []);
 
         $result[] = [
-            'id'                => $id,
-            'name'              => $m['name'],
-            'vehicleNumber'     => $m['vehicleNumber'],
-            'grade'             => $m['grade'],
-            'status'            => $m['status'],
-            'garage'            => $m['garage'],
-            'phone'             => $m['phone'],
-            'joinDate'          => $m['joinDate'],
-            'vehicleType'       => $m['vehicleType'],
-            'specialEquipments' => array_values($eq),
-            'vehiclePhoto'      => $m['vehiclePhoto'],
-            'roadAddress'       => $m['roadAddress'],
-            'mailingAddress'    => $m['mailingAddress'],
-            'disciplineRecords' => $discRecords,
-            'mutualAidRecords'  => $aidRecords,
+            'id'=>$id,'name'=>$m['name'],'vehicleNumber'=>$m['vehicleNumber'],
+            'grade'=>$m['grade'],'status'=>$m['status'],'garage'=>$m['garage'],
+            'phone'=>$m['phone'],'joinDate'=>$m['joinDate'],'vehicleType'=>$m['vehicleType'],
+            'specialEquipments'=>array_values($eq),'vehiclePhoto'=>$m['vehiclePhoto'],
+            'postalCode'=>$m['postalCode']??'','roadAddress'=>$m['roadAddress'],
+            'addressDetail'=>$m['addressDetail']??'','mailingAddress'=>$m['mailingAddress'],
+            'disciplineRecords'=>$disc,'mutualAidRecords'=>$aid,
         ];
     }
     return $result;
 }
 
-// ── 회원 전체 저장 (upsert + 삭제된 것 제거) ────────────────────────────────
 function saveMembers(array $members): void {
     $pdo = db();
-
-    $memberSql = "INSERT INTO jil_members
-        (id,name,vehicleNumber,grade,status,garage,phone,joinDate,vehicleType,specialEquipments,vehiclePhoto,roadAddress,mailingAddress)
-        VALUES (:id,:name,:vehicleNumber,:grade,:status,:garage,:phone,:joinDate,:vehicleType,:specialEquipments,:vehiclePhoto,:roadAddress,:mailingAddress)
+    $mSql = "INSERT INTO jil_members
+        (id,name,vehicleNumber,grade,status,garage,phone,joinDate,vehicleType,
+         specialEquipments,vehiclePhoto,postalCode,roadAddress,addressDetail,mailingAddress)
+        VALUES (:id,:name,:vehicleNumber,:grade,:status,:garage,:phone,:joinDate,:vehicleType,
+         :specialEquipments,:vehiclePhoto,:postalCode,:roadAddress,:addressDetail,:mailingAddress)
         ON DUPLICATE KEY UPDATE
-          name=VALUES(name), vehicleNumber=VALUES(vehicleNumber), grade=VALUES(grade),
-          status=VALUES(status), garage=VALUES(garage), phone=VALUES(phone),
-          joinDate=VALUES(joinDate), vehicleType=VALUES(vehicleType),
-          specialEquipments=VALUES(specialEquipments), vehiclePhoto=VALUES(vehiclePhoto),
-          roadAddress=VALUES(roadAddress), mailingAddress=VALUES(mailingAddress)";
-    $mStmt = $pdo->prepare($memberSql);
+          name=VALUES(name),vehicleNumber=VALUES(vehicleNumber),grade=VALUES(grade),
+          status=VALUES(status),garage=VALUES(garage),phone=VALUES(phone),
+          joinDate=VALUES(joinDate),vehicleType=VALUES(vehicleType),
+          specialEquipments=VALUES(specialEquipments),vehiclePhoto=VALUES(vehiclePhoto),
+          postalCode=VALUES(postalCode),roadAddress=VALUES(roadAddress),
+          addressDetail=VALUES(addressDetail),mailingAddress=VALUES(mailingAddress)";
+    $mStmt = $pdo->prepare($mSql);
 
-    $discSql = "INSERT INTO jil_discipline (id,memberId,date,content,disciplineDetail,startDate,endDate)
+    $dStmt = $pdo->prepare("INSERT INTO jil_discipline
+        (id,memberId,date,content,disciplineDetail,startDate,endDate)
         VALUES (:id,:memberId,:date,:content,:disciplineDetail,:startDate,:endDate)
-        ON DUPLICATE KEY UPDATE
-          date=VALUES(date), content=VALUES(content), disciplineDetail=VALUES(disciplineDetail),
-          startDate=VALUES(startDate), endDate=VALUES(endDate)";
-    $dStmt = $pdo->prepare($discSql);
+        ON DUPLICATE KEY UPDATE date=VALUES(date),content=VALUES(content),
+          disciplineDetail=VALUES(disciplineDetail),startDate=VALUES(startDate),endDate=VALUES(endDate)");
 
-    $aidSql = "INSERT INTO jil_mutual_aid (id,memberId,date,category,aidDetail,amount)
+    $aStmt = $pdo->prepare("INSERT INTO jil_mutual_aid
+        (id,memberId,date,category,aidDetail,amount)
         VALUES (:id,:memberId,:date,:category,:aidDetail,:amount)
-        ON DUPLICATE KEY UPDATE
-          date=VALUES(date), category=VALUES(category),
-          aidDetail=VALUES(aidDetail), amount=VALUES(amount)";
-    $aStmt = $pdo->prepare($aidSql);
+        ON DUPLICATE KEY UPDATE date=VALUES(date),category=VALUES(category),
+          aidDetail=VALUES(aidDetail),amount=VALUES(amount)");
 
-    $incomingIds   = [];
-    $incomingDiscIds = [];
-    $incomingAidIds  = [];
-
+    $mIds = $dIds = $aIds = [];
     $pdo->beginTransaction();
     try {
         foreach ($members as $m) {
-            $id = $m['id'] ?? '';
-            if (!$id) continue;
-            $incomingIds[] = $id;
-
+            $id = $m['id'] ?? ''; if (!$id) continue;
+            $mIds[] = $id;
             $mStmt->execute([
-                ':id'               => $id,
-                ':name'             => $m['name']              ?? '',
-                ':vehicleNumber'    => $m['vehicleNumber']     ?? '',
-                ':grade'            => $m['grade']             ?? '일반',
-                ':status'           => $m['status']            ?? '활성',
-                ':garage'           => $m['garage']            ?? '서울',
-                ':phone'            => $m['phone']             ?? '',
-                ':joinDate'         => $m['joinDate']          ?? '',
-                ':vehicleType'      => $m['vehicleType']       ?? '1톤',
-                ':specialEquipments'=> json_encode($m['specialEquipments'] ?? [], JSON_UNESCAPED_UNICODE),
-                ':vehiclePhoto'     => $m['vehiclePhoto']      ?? '',
-                ':roadAddress'      => $m['roadAddress']       ?? '',
-                ':mailingAddress'   => $m['mailingAddress']    ?? '',
+                ':id'=>$id,':name'=>$m['name']??'',':vehicleNumber'=>$m['vehicleNumber']??'',
+                ':grade'=>$m['grade']??'일반',':status'=>$m['status']??'활성',':garage'=>$m['garage']??'서울',
+                ':phone'=>$m['phone']??'',':joinDate'=>$m['joinDate']??'',':vehicleType'=>$m['vehicleType']??'1톤',
+                ':specialEquipments'=>json_encode($m['specialEquipments']??[],JSON_UNESCAPED_UNICODE),
+                ':vehiclePhoto'=>$m['vehiclePhoto']??'',':postalCode'=>$m['postalCode']??'',
+                ':roadAddress'=>$m['roadAddress']??'',':addressDetail'=>$m['addressDetail']??'',
+                ':mailingAddress'=>$m['mailingAddress']??'',
             ]);
-
-            foreach (($m['disciplineRecords'] ?? []) as $r) {
-                $rid = $r['id'] ?? '';
-                if (!$rid) continue;
-                $incomingDiscIds[] = $rid;
-                $dStmt->execute([
-                    ':id'               => $rid,
-                    ':memberId'         => $id,
-                    ':date'             => $r['date']             ?? '',
-                    ':content'          => $r['content']          ?? '',
-                    ':disciplineDetail' => $r['disciplineDetail'] ?? '',
-                    ':startDate'        => $r['startDate']        ?? '',
-                    ':endDate'          => $r['endDate']          ?? '',
-                ]);
+            foreach ($m['disciplineRecords']??[] as $r) {
+                $rid=$r['id']??''; if(!$rid) continue; $dIds[]=$rid;
+                $dStmt->execute([':id'=>$rid,':memberId'=>$id,':date'=>$r['date']??'',
+                    ':content'=>$r['content']??'',':disciplineDetail'=>$r['disciplineDetail']??'',
+                    ':startDate'=>$r['startDate']??'',':endDate'=>$r['endDate']??'']);
             }
-
-            foreach (($m['mutualAidRecords'] ?? []) as $r) {
-                $rid = $r['id'] ?? '';
-                if (!$rid) continue;
-                $incomingAidIds[] = $rid;
-                $aStmt->execute([
-                    ':id'        => $rid,
-                    ':memberId'  => $id,
-                    ':date'      => $r['date']      ?? '',
-                    ':category'  => $r['category']  ?? '기타',
-                    ':aidDetail' => $r['aidDetail']  ?? '',
-                    ':amount'    => (int)($r['amount'] ?? 0),
-                ]);
+            foreach ($m['mutualAidRecords']??[] as $r) {
+                $rid=$r['id']??''; if(!$rid) continue; $aIds[]=$rid;
+                $aStmt->execute([':id'=>$rid,':memberId'=>$id,':date'=>$r['date']??'',
+                    ':category'=>$r['category']??'기타',':aidDetail'=>$r['aidDetail']??'',
+                    ':amount'=>(int)($r['amount']??0)]);
             }
         }
-
-        // 삭제된 회원/레코드 제거
-        if (!empty($incomingIds)) {
-            $ph = implode(',', array_fill(0, count($incomingIds), '?'));
-            $pdo->prepare("DELETE FROM jil_members WHERE id NOT IN ($ph)")->execute($incomingIds);
-        } else {
-            $pdo->exec("DELETE FROM jil_members");
-        }
-
-        if (!empty($incomingDiscIds)) {
-            $ph = implode(',', array_fill(0, count($incomingDiscIds), '?'));
-            $pdo->prepare("DELETE FROM jil_discipline WHERE id NOT IN ($ph)")->execute($incomingDiscIds);
-        } else {
-            $pdo->exec("DELETE FROM jil_discipline");
-        }
-
-        if (!empty($incomingAidIds)) {
-            $ph = implode(',', array_fill(0, count($incomingAidIds), '?'));
-            $pdo->prepare("DELETE FROM jil_mutual_aid WHERE id NOT IN ($ph)")->execute($incomingAidIds);
-        } else {
-            $pdo->exec("DELETE FROM jil_mutual_aid");
-        }
-
+        if ($mIds) {
+            $ph = implode(',', array_fill(0, count($mIds), '?'));
+            $pdo->prepare("DELETE FROM jil_members WHERE id NOT IN ($ph)")->execute($mIds);
+        } else { $pdo->exec("DELETE FROM jil_members"); }
+        if ($dIds) {
+            $ph = implode(',', array_fill(0, count($dIds), '?'));
+            $pdo->prepare("DELETE FROM jil_discipline WHERE id NOT IN ($ph)")->execute($dIds);
+        } else { $pdo->exec("DELETE FROM jil_discipline"); }
+        if ($aIds) {
+            $ph = implode(',', array_fill(0, count($aIds), '?'));
+            $pdo->prepare("DELETE FROM jil_mutual_aid WHERE id NOT IN ($ph)")->execute($aIds);
+        } else { $pdo->exec("DELETE FROM jil_mutual_aid"); }
         $pdo->commit();
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        throw $e;
-    }
+    } catch (Exception $e) { $pdo->rollBack(); throw $e; }
 }
 
-// ── 라우팅 ───────────────────────────────────────────────────────────────────
-try {
-    initTables();
-} catch (Exception $e) {
-    fail('DB 초기화 실패: ' . $e->getMessage(), 500);
-}
+// ── 실행 ─────────────────────────────────────────────────────────────────────
+try { initTables(); } catch (Exception $e) { fail('DB 오류: ' . $e->getMessage(), 500); }
 
 $action = $_GET['action'] ?? '';
-
 switch ($action) {
 
     case 'ping':
         $tables = db()->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
-        ok(['version' => '5.0', 'time' => date('c'), 'tables' => $tables]);
+        out(['ok'=>true,'version'=>'6.0','time'=>date('c'),'tables'=>$tables]);
+
+    case 'get_regions':
+        try { out(db()->query("SELECT * FROM regions ORDER BY id")->fetchAll()); }
+        catch (Exception $e) { out([]); }
 
     case 'get_members':
         out(getMembers());
 
     case 'save_members':
-        $data = body();
-        if (!is_array($data)) fail('배열이어야 합니다');
-        saveMembers($data);
-        ok();
+        $data = body(); if (!is_array($data)) fail('배열 필요');
+        saveMembers($data); ok();
 
     case 'get_admins':
-        $rows = db()->query("SELECT id, password, name, isSuperAdmin FROM jil_admins")->fetchAll();
-        $result = array_map(fn($r) => [
-            'id'          => $r['id'],
-            'password'    => $r['password'],
-            'name'        => $r['name'],
-            'isSuperAdmin'=> (bool)$r['isSuperAdmin'],
-        ], $rows);
-        out($result);
+        $rows = db()->query("SELECT id,password,name,isSuperAdmin FROM jil_admins")->fetchAll();
+        out(array_map(fn($r)=>[
+            'id'=>$r['id'],'password'=>$r['password'],'name'=>$r['name'],
+            'isSuperAdmin'=>(bool)$r['isSuperAdmin']
+        ], $rows));
 
     case 'save_admins':
-        $admins = body();
-        if (!is_array($admins)) fail('배열이어야 합니다');
+        $admins = body(); if (!is_array($admins)) fail('배열 필요');
         $pdo = db();
         $stmt = $pdo->prepare("INSERT INTO jil_admins (id,password,name,isSuperAdmin)
             VALUES (:id,:password,:name,:isSuperAdmin)
-            ON DUPLICATE KEY UPDATE password=VALUES(password), name=VALUES(name), isSuperAdmin=VALUES(isSuperAdmin)");
+            ON DUPLICATE KEY UPDATE password=VALUES(password),name=VALUES(name),isSuperAdmin=VALUES(isSuperAdmin)");
         $inIds = [];
         $pdo->beginTransaction();
         try {
             foreach ($admins as $a) {
-                $stmt->execute([
-                    ':id'          => $a['id'],
-                    ':password'    => $a['password'],
-                    ':name'        => $a['name'],
-                    ':isSuperAdmin'=> $a['isSuperAdmin'] ? 1 : 0,
-                ]);
+                $stmt->execute([':id'=>$a['id'],':password'=>$a['password'],
+                    ':name'=>$a['name'],':isSuperAdmin'=>$a['isSuperAdmin']?1:0]);
                 $inIds[] = $a['id'];
             }
-            if (!empty($inIds)) {
+            if ($inIds) {
                 $ph = implode(',', array_fill(0, count($inIds), '?'));
                 $pdo->prepare("DELETE FROM jil_admins WHERE id NOT IN ($ph)")->execute($inIds);
             }
             $pdo->commit();
-        } catch (Exception $e) {
-            $pdo->rollBack();
-            throw $e;
-        }
+        } catch (Exception $e) { $pdo->rollBack(); throw $e; }
         ok();
 
     default:
-        fail('알 수 없는 action: ' . $action, 404);
+        fail('Unknown action: ' . $action, 404);
 }
