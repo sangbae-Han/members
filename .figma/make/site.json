@@ -1,0 +1,10 @@
+{
+  "description": "Provides a streamlined platform for managing and organizing tasks efficiently, enhancing productivity for individuals and teams.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
